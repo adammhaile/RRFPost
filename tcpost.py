@@ -1,0 +1,226 @@
+import sys
+import os
+import re
+
+MOVE_RE = '([XYZEF] *-?\d+.?\d*)'
+WARM_TIME = 30.0
+
+class GCodeLine():
+    def __init__(self, num, line):
+        self.num = num
+        self.line = line
+        self.pre = None
+        self.post = None
+        
+    def get_lines(self, comments=True):
+        res = ''
+        if(self.pre is not None): res += (self.pre + '\n')
+        if comments or ((not comments) and (not self.line.lstrip().startswith(';'))):
+            res += (self.line + '\n')
+        if(self.post is not None): res += (self.post + '\n')
+        return res
+        
+    def __str__(self):
+        return f'{self.num}: {self.line}'
+
+class Move(GCodeLine):
+    def __init__(self, num, line, x=None, y=None, z=None, e=None, f=None, t=None):
+        super().__init__(num, line)
+        self.x = x
+        self.y = y
+        self.z = z
+        self.e = e
+        self.f = f
+        self.t = t
+        self.time = 0.0
+        
+    def gen_relative_xyz(self, x, y, z):
+        rx = 0.0
+        if(self.x is not None):
+            if(self.x <= x): rx = x - self.x
+            else: rx = self.x - x
+        ry = 0.0
+        if(self.y is not None):
+            if(self.y <= y): ry = y - self.y
+            else: ry = self.y - y
+        rz = 0.0
+        if(self.z is not None):
+            if(self.z <= z): rz = z - self.z
+            else: rz = self.z - z
+        
+        return (rx, ry, rz)
+        
+    def __str__(self):
+        return f'{self.num} - X: {self.x}, Y: {self.y}, Z: {self.z}, E: {self.e}, F: {self.f}, T: {self.t}, Time: {self.time}'
+        
+class ToolChange(GCodeLine):
+    def __init__(self, num, line, t):
+        super().__init__(num, line)
+        self.t = t
+        
+    def __str__(self):
+        return f'{self.num}: T{self.t}'
+        
+class ToolTemp(GCodeLine):
+    def __init__(self, num, line, tool, temp=None, standby=None):
+        super().__init__(num, line)
+        self.tool = tool
+        self.temp = temp
+        self.standby = standby
+
+class ToolDef():
+    def __init__(self, tool=None, temp=None, standby=None):
+        self.tool = tool
+        self.temp = temp
+        self.standby = standby
+        
+    def __str__(self):
+        return f'G10 P{self.tool} S{self.temp} R{self.standby}'
+        
+class MoveSim:
+    def __init__(self):
+        self.mf = re.compile(MOVE_RE)
+        self.loc = [0, 0, 0]
+        self.feedrate = 3000.0 / 60.0  # RRF default is 3000mm/min but we want mm/s
+        self.lines = []
+        self.tools = {}
+    
+    def parse_lines(self, lines):
+        count = 0
+        for l in lines:
+            l = l.rstrip('\n\r')
+            count += 1
+            ul = l.rstrip().upper()
+            
+            if(ul.startswith('G0 ') or ul.startswith('G1 ')):
+                move = Move(count, l)
+                for m in self.mf.findall(ul):
+                    if(m.startswith('X')):
+                        move.x = float(m[1:])
+                    elif(m.startswith('Y')):
+                        move.y = float(m[1:])
+                    elif(m.startswith('Z')):
+                        move.z = float(m[1:])
+                    elif(m.startswith('E')):
+                        move.e = float(m[1:])
+                    elif(m.startswith('F')):
+                        move.f = float(m[1:]) / 60.0  # always convert to mm/s
+                self.lines.append(move)
+            elif(ul.startswith('G10 ')):
+                sub = ul.split(' ')
+                tool = None
+                temp = None
+                standby = None
+                for s in sub:
+                    if ';' in s:
+                        break
+                    elif s.startswith("P"):
+                        tool = int(s[1:])
+                    elif s.startswith("S"):
+                        temp = int(s[1:])
+                    elif s.startswith("R"):
+                        standby = int(s[1:])
+                        
+                if tool is not None and (temp is not None or standby is not None):
+                    tt = ToolTemp(count, l, tool, temp, standby)
+                    self.lines.append(tt)
+                else:
+                    gcl = GCodeLine(count, l)
+                    self.lines.append(gcl)
+            elif(ul.startswith('T')):
+                tn_str = ''
+                for c in ul[1:]:
+                    if( c == '-' or c.isnumeric()):
+                        tn_str += c
+                    else:
+                        break  # end of tool num, bail out
+                try:
+                    tool_num = int(tn_str)
+                except:
+                    print(f'Invalid T command: {l}')
+                    
+                tc = ToolChange(count, l, tool_num)
+                self.lines.append(tc)
+            else:
+                gcl = GCodeLine(count, l)
+                self.lines.append(gcl)
+                
+        return self.lines
+        
+    def calc_times(self):
+        for l in self.lines:
+            if isinstance(l, Move):
+                m = l
+                if m.t is not None:
+                    continue
+                if m.f is not None:
+                    self.feedrate = m.f
+                
+                m.f = self.feedrate
+                xyz = m.gen_relative_xyz(*self.loc)
+                mx = max(xyz)
+                if(mx > 0.0):
+                    m.time = mx / self.feedrate
+                    
+                if(m.x is not None): self.loc[0] = m.x
+                if(m.y is not None): self.loc[1] = m.y
+                if(m.z is not None): self.loc[2] = m.z
+                
+    def gen_warmups(self):
+        lastTool = -1
+        for l in self.lines:
+            if isinstance(l, ToolChange):
+                if l.t < 0: 
+                    lastTool = l.t
+                    continue  # tool return. No warmup
+                curTotal = 0.0
+                for ri in reversed(range(l.num-2)):
+                    if ri < 0: break
+                    rl = self.lines[ri]
+                    if isinstance(rl, ToolChange): break # toolchange before timeout, nevermind
+                    if isinstance(rl, Move):
+                        curTotal += rl.time
+                        if curTotal >= WARM_TIME:
+                            rl.pre = f'!!! WARMUP T{l.t}'
+                            if l.t not in self.tools:
+                                raise Exception(f'No temperature parameters defined for T{l.t}')
+                            td = self.tools[l.t]
+                            if td.temp is not None:
+                                rl.pre = f'G10 P{l.t} R{td.temp} ;  Warmup T{l.t}'
+                            if lastTool >= 0:
+                                if lastTool not in self.tools:
+                                    raise Exception(f'No temperature parameters defined for T{lastTool}')
+                                td = self.tools[lastTool]
+                                if td.standby is not None:
+                                    l.pre = f'G10 P{lastTool} R{td.standby} ;  Restore T{lastTool}'
+                            break
+                lastTool = l.t
+            elif isinstance(l, ToolTemp):
+                if not (l.tool in self.tools):
+                    td = ToolDef(l.tool, l.temp, l.standby)
+                    self.tools[l.tool] = td
+                else:
+                    if l.temp is not None:
+                        self.tools[l.tool].temp = l.temp
+                    if l.standby is not None:
+                        self.tools[l.tool].standby = l.standby
+                
+
+def load_file(path):
+    with open(path, 'r') as f:
+        return f.readlines()
+        
+def main():
+    infile = sys.argv[1]
+    infile = os.path.abspath(infile)
+    lines = load_file(infile)
+    ms = MoveSim()
+    ms.parse_lines(lines)
+    ms.calc_times()
+    ms.gen_warmups()
+    
+    for l in ms.lines:
+        print(l.get_lines(False), end='')
+
+if __name__ == '__main__':
+    main()
