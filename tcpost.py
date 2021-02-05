@@ -219,8 +219,9 @@ def main():
     ms.calc_times()
     ms.gen_warmups()
     
-    for l in ms.lines:
-        print(l.get_lines(False), end='')
+    with open(infile, 'w') as f:
+        for l in ms.lines:
+            f.write(l.get_lines(True))
 
 if __name__ == '__main__':
     main()
