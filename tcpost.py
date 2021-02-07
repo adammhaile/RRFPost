@@ -173,26 +173,34 @@ class MoveSim:
                 if l.t < 0: 
                     lastTool = l.t
                     continue  # tool return. No warmup
+                if l.t not in self.tools:
+                    raise Exception(f'No temperature parameters defined for T{l.t}')
                 curTotal = 0.0
                 for ri in reversed(range(l.num-2)):
                     if ri < 0: break
                     rl = self.lines[ri]
-                    if isinstance(rl, ToolChange): break # toolchange before timeout, nevermind
+                    td = self.tools[l.t]
+                    if isinstance(rl, ToolChange):
+                        if td.temp is not None:
+                            rl.post = f'G10 R{td.temp} P{l.t} ;  Warmup T{l.t}'
+                        if lastTool >= 0:
+                            if lastTool not in self.tools:
+                                raise Exception(f'No temperature parameters defined for T{lastTool}')
+                            td = self.tools[lastTool]
+                            if td.standby is not None:
+                                l.pre = f'G10 R{td.standby} P{lastTool} ;  Restore T{lastTool}'
+                        break
                     if isinstance(rl, Move):
                         curTotal += rl.time
                         if curTotal >= self.warmup_time:
-                            rl.pre = f'!!! WARMUP T{l.t}'
-                            if l.t not in self.tools:
-                                raise Exception(f'No temperature parameters defined for T{l.t}')
-                            td = self.tools[l.t]
                             if td.temp is not None:
-                                rl.pre = f'G10 P{l.t} R{td.temp} ;  Warmup T{l.t}'
+                                rl.pre = f'G10 R{td.temp} P{l.t} ;  Warmup T{l.t}'
                             if lastTool >= 0:
                                 if lastTool not in self.tools:
                                     raise Exception(f'No temperature parameters defined for T{lastTool}')
                                 td = self.tools[lastTool]
                                 if td.standby is not None:
-                                    l.pre = f'G10 P{lastTool} R{td.standby} ;  Restore T{lastTool}'
+                                    l.pre = f'G10 R{td.standby} P{lastTool} ;  Restore T{lastTool}'
                             break
                 lastTool = l.t
             elif isinstance(l, ToolTemp):
