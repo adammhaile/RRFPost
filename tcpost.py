@@ -3,7 +3,6 @@ import os
 import re
 
 MOVE_RE = '([XYZEF] *-?\d+.?\d*)'
-WARM_TIME = 30.0
 
 class GCodeLine():
     def __init__(self, num, line):
@@ -78,7 +77,8 @@ class ToolDef():
         return f'G10 P{self.tool} S{self.temp} R{self.standby}'
         
 class MoveSim:
-    def __init__(self):
+    def __init__(self, warmup_time=30.0):
+        self.warmup_time = warmup_time
         self.mf = re.compile(MOVE_RE)
         self.loc = [0, 0, 0]
         self.feedrate = 3000.0 / 60.0  # RRF default is 3000mm/min but we want mm/s
@@ -180,7 +180,7 @@ class MoveSim:
                     if isinstance(rl, ToolChange): break # toolchange before timeout, nevermind
                     if isinstance(rl, Move):
                         curTotal += rl.time
-                        if curTotal >= WARM_TIME:
+                        if curTotal >= self.warmup_time:
                             rl.pre = f'!!! WARMUP T{l.t}'
                             if l.t not in self.tools:
                                 raise Exception(f'No temperature parameters defined for T{l.t}')
@@ -211,10 +211,21 @@ def load_file(path):
         return f.readlines()
         
 def main():
-    infile = sys.argv[1]
+    if len(sys.argv) != 3:
+        print('Usage: python tcpost.py <warmup_time_seconds> <gcode_file_path>')
+        sys.exit(1)
+
+    warmup_time = sys.argv[1]
+    try:
+        warmup_time = float(warmup_time)
+    except:
+        print('Error: warmup time value must be a number')
+        sys.exit(1)
+
+    infile = sys.argv[2]
     infile = os.path.abspath(infile)
     lines = load_file(infile)
-    ms = MoveSim()
+    ms = MoveSim(warmup_time)
     ms.parse_lines(lines)
     ms.calc_times()
     ms.gen_warmups()
