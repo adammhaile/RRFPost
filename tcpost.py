@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import argparse
 
 MOVE_RE = '([XYZEF] *-?\d+.?\d*)'
 
@@ -219,18 +220,29 @@ def load_file(path):
         return f.readlines()
         
 def main():
-    if len(sys.argv) != 3:
-        print('Usage: python tcpost.py <warmup_time_seconds> <gcode_file_path>')
+    parser = argparse.ArgumentParser(
+        description='TCPost: ToolChanger gcode post-processor'
+    )
+    
+    parser.add_argument('--preheat', action='store', 
+                        dest='preheat_seconds', type=int,
+                        help='Inject automatic tool preheats')
+    parser.add_argument('gcode', action='store',
+                        help='gcode file to process')
+                        
+    args = parser.parse_args()
+    if args.preheat_seconds is None:
+        parser.print_help()
         sys.exit(1)
 
-    warmup_time = sys.argv[1]
+    warmup_time = args.preheat_seconds
     try:
         warmup_time = float(warmup_time)
     except:
         print('Error: warmup time value must be a number')
         sys.exit(1)
 
-    infile = sys.argv[2]
+    infile = args.gcode
     infile = os.path.abspath(infile)
     lines = load_file(infile)
     ms = MoveSim(warmup_time)
