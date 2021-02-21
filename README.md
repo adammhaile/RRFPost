@@ -4,6 +4,10 @@ This project was created with the intent to provide useful ToolChanger gcode pos
 
 As of February 2021, the only contained functionality is that of automatic tool pre-heat. More is planned for the future.
 
+# Disclaimer
+
+I do my absolute best to fully test everything, but this is still something that is modifying your gcode, and everyone's setup is different. By using this post-processor you agree to take full liability for the your printer safety and any harm or damage that may be caused by using this code. 
+
 ## Tool Preheat
 
 Currently PrusaSlicer (or most slicers for that matter) do not support automatic tool preheat. Functionally, this means that if you use a standby temperature you will have to wait for the tool to come back up to temperature before printing will continue. TCPost's preheat functionality solves that issue by injecting changes to the standby temperature so that it's ready to go the moment a tool is picked up.
