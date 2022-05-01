@@ -2,8 +2,9 @@ import sys
 import os
 import re
 import argparse
+import math
 
-MOVE_RE = '([XYZEF] *-?\d+.?\d*)'
+MOVE_RE = '([XYZEF] *-?\d*.?\d*)'
 
 class GCodeLine():
     def __init__(self, num, line):
@@ -78,34 +79,39 @@ class ToolDef():
         return f'G10 P{self.tool} S{self.temp} R{self.standby}'
         
 class MoveSim:
-    def __init__(self, warmup_time=30.0):
-        self.warmup_time = warmup_time
+    def __init__(self):
         self.mf = re.compile(MOVE_RE)
         self.loc = [0, 0, 0]
         self.feedrate = 3000.0 / 60.0  # RRF default is 3000mm/min but we want mm/s
         self.lines = []
         self.tools = {}
+        self.used_tools = set()
     
     def parse_lines(self, lines):
         count = 0
+        lastTool = None
         for l in lines:
             l = l.rstrip('\n\r')
             count += 1
             ul = l.rstrip().upper()
             
             if(ul.startswith('G0 ') or ul.startswith('G1 ')):
-                move = Move(count, l)
+                move = Move(count, l, t=lastTool)
                 for m in self.mf.findall(ul):
-                    if(m.startswith('X')):
-                        move.x = float(m[1:])
-                    elif(m.startswith('Y')):
-                        move.y = float(m[1:])
-                    elif(m.startswith('Z')):
-                        move.z = float(m[1:])
-                    elif(m.startswith('E')):
-                        move.e = float(m[1:])
-                    elif(m.startswith('F')):
-                        move.f = float(m[1:]) / 60.0  # always convert to mm/s
+                    try:
+                        if(m.startswith('X')):
+                            move.x = float(m[1:])
+                        elif(m.startswith('Y')):
+                            move.y = float(m[1:])
+                        elif(m.startswith('Z')):
+                            move.z = float(m[1:])
+                        elif(m.startswith('E')):
+                            move.e = float(m[1:])
+                        elif(m.startswith('F')):
+                            move.f = float(m[1:]) / 60.0  # always convert to mm/s
+                    except ValueError:
+                        pass # got non-numeric
+                        
                 self.lines.append(move)
             elif(ul.startswith('G10 ')):
                 sub = ul.split(' ')
@@ -137,11 +143,12 @@ class MoveSim:
                         break  # end of tool num, bail out
                 try:
                     tool_num = int(tn_str)
+                    tc = ToolChange(count, l, tool_num)
+                    lastTool = tool_num
+                    self.used_tools.add(tool_num)
+                    self.lines.append(tc)
                 except:
                     print(f'Invalid T command: {l}')
-                    
-                tc = ToolChange(count, l, tool_num)
-                self.lines.append(tc)
             else:
                 gcl = GCodeLine(count, l)
                 self.lines.append(gcl)
@@ -167,7 +174,7 @@ class MoveSim:
                 if(m.y is not None): self.loc[1] = m.y
                 if(m.z is not None): self.loc[2] = m.z
                 
-    def gen_warmups(self):
+    def gen_warmups(self, warmup_time=30.0):
         lastTool = -1
         for l in self.lines:
             if isinstance(l, ToolChange):
@@ -183,7 +190,7 @@ class MoveSim:
                     td = self.tools[l.t]
                     if isinstance(rl, ToolChange):
                         if td.temp is not None:
-                            rl.post = f'G10 R{td.temp} P{l.t} ;  Warmup T{l.t}'
+                            rl.post = f'G10 P{l.t} R{td.temp} ;  Warmup T{l.t}'
                         if lastTool >= 0:
                             if lastTool not in self.tools:
                                 raise Exception(f'No temperature parameters defined for T{lastTool}')
@@ -193,7 +200,7 @@ class MoveSim:
                         break
                     if isinstance(rl, Move):
                         curTotal += rl.time
-                        if curTotal >= self.warmup_time:
+                        if curTotal >= warmup_time:
                             if td.temp is not None:
                                 rl.pre = f'G10 R{td.temp} P{l.t} ;  Warmup T{l.t}'
                             if lastTool >= 0:
@@ -213,6 +220,110 @@ class MoveSim:
                         self.tools[l.tool].temp = l.temp
                     if l.standby is not None:
                         self.tools[l.tool].standby = l.standby
+                        
+    def gen_pause(self, tool, mass, length, pausecode, diameter, density, **kwargs):
+        lastTool = -1
+        total_len = {}
+        total_mass = {}
+        g_per_mm3 = density * 0.001
+        radius_squared = math.pow(diameter/2.0, 2)
+        
+        print("Inserting automatic pauses...")
+        
+        if tool == -1:
+            if len(self.used_tools) >= 1:
+                tool = list(self.used_tools)[0]
+            else:
+                tool = 0
+                
+        mass_targets = []
+        for m in mass.strip().split(','):
+            if m:
+                try:
+                    mass_targets.append(int(m))
+                except ValueError:
+                    print(f'ERROR: {m} is not a valid mass value!')
+                
+        mass_target_count = len(mass_targets)
+        mass_target_cur = 0
+        
+        len_targets = []
+        for l in length.strip().split(','):
+            if l:
+                try:
+                    len_targets.append(int(l))
+                except ValueError:
+                    print(f'ERROR: {m} is not a valid length value!')
+                
+        len_target_count = len(len_targets)
+        len_target_cur = 0
+            
+        
+        mass_target = None
+        if len(mass_targets):
+            mass_target = mass_targets[mass_target_cur]
+        
+        len_target = None
+        if len(len_targets):
+            len_target = len_targets[len_target_cur]
+
+        for l in self.lines:
+            if isinstance(l, Move):
+                if l.e is not None:
+                    if l.t is None:
+                        l.t = 0 #normalize tool index
+
+                    if l.t not in total_len:
+                        total_len[l.t] = 0.0
+                    if l.t not in total_mass:
+                        total_mass[l.t] = 0.0
+                        
+                    total_len[l.t] += l.e
+                    
+                    mass = math.pi * radius_squared * l.e * g_per_mm3
+                    total_mass[l.t] += mass
+                    
+                    if l.t == None or tool == l.t:
+                        if mass_target and total_mass[l.t] >= mass_target:
+                            print(f"Inserted T{l.t} pause after line {l.num}")
+                            l.post = f";TCPost auto-pause for T{l.t} at {int(total_mass[l.t])} g\n"
+                            l.post += pausecode
+                            if mass_target_cur < (mass_target_count - 1):
+                                mass_target_cur += 1
+                                mass_target = mass_targets[mass_target_cur]
+                                total_mass[l.t] = 0.0
+                            else:
+                                mass_target = None
+                        if len_target and total_len[l.t] >= len_target:
+                            print(f"Inserted T{l.t} pause after line {l.num}")
+                            l.post = f";TCPost auto-pause for T{l.t} at {round(total_len[l.t], 2)} mm\n"
+                            l.post += pausecode
+                            if len_target_cur < (len_target_count - 1):
+                                len_target_cur += 1
+                                len_target = len_targets[len_target_cur]
+                                total_len[l.t] = 0.0
+                            else:
+                                len_target = None
+                            
+        print("Length totals:")
+        all_total = 0.0
+        for tool, total in total_len.items():
+            if tool is None:
+                tool = 0
+            print(f'  Tool {tool}: {round(total, 1)} mm')
+            all_total += total
+            
+        print(f'  Total:  {round(all_total, 1)} mm')
+        
+        print("Mass totals:")
+        all_total = 0.0
+        for tool, total in total_mass.items():
+            if tool is None:
+                tool = 0
+            print(f'  Tool {tool}: {round(total, 2)} g')
+            all_total += total
+            
+        print(f'  Total:  {round(all_total, 2)} g')
                 
 
 def load_file(path):
@@ -224,31 +335,38 @@ def main():
         description='TCPost: ToolChanger gcode post-processor'
     )
     
-    parser.add_argument('--preheat', action='store', 
-                        dest='preheat_seconds', type=int,
-                        help='Inject automatic tool preheats')
+    subs = parser.add_subparsers(dest='cmd')
+    
+    # parser for preheat
+    parser_preheat = subs.add_parser('preheat', help='Inject automatic tool preheats')
+    parser_preheat.add_argument('--sec', type=int, default=30.0, help='Aproximate seconds to allow for preheat')
+    
+    #parser for pause
+    parser_pause = subs.add_parser('pause', help='Inject automatic pause based on mass or length')
+    parser_pause.add_argument('--tool', type=int, default=-1, help='Tool to apply pause to')
+    parser_pause.add_argument('--diameter', type=float, default=1.75, help='Filament diameter. Defaults to 1.75mm')
+    parser_pause.add_argument('--density', type=float, default=1.24, help='Filament density in g/cm^3. Defaults to 1.24 for PLA')
+    group = parser_pause.add_mutually_exclusive_group(required=True)
+    group.add_argument('--mass', type=str, default='', help='Pause at this many grams')
+    group.add_argument('--length', type=str, default='', help='Pause at this length in mm')
+    parser_pause.add_argument('--pausecode', type=str, default='M226', help='GCode text or filepath to inject at pause')
+    
     parser.add_argument('gcode', action='store',
                         help='gcode file to process')
                         
     args = parser.parse_args()
-    if args.preheat_seconds is None:
-        parser.print_help()
-        sys.exit(1)
-
-    warmup_time = args.preheat_seconds
-    try:
-        warmup_time = float(warmup_time)
-    except:
-        print('Error: warmup time value must be a number')
-        sys.exit(1)
-
+    
     infile = args.gcode
     infile = os.path.abspath(infile)
     lines = load_file(infile)
-    ms = MoveSim(warmup_time)
+    ms = MoveSim()
     ms.parse_lines(lines)
-    ms.calc_times()
-    ms.gen_warmups()
+    
+    if(args.cmd == 'preheat'):
+        ms.calc_times()
+        ms.gen_warmups(args.sec)
+    elif(args.cmd == 'pause'):
+        ms.gen_pause(**vars(args))
     
     with open(infile, 'w') as f:
         for l in ms.lines:
