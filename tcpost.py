@@ -86,6 +86,8 @@ class MoveSim:
         self.lines = []
         self.tools = {}
         self.used_tools = set()
+        self.auto_density = []
+        self.auto_diameter = []
     
     def parse_lines(self, lines):
         count = 0
@@ -152,6 +154,23 @@ class MoveSim:
             else:
                 gcl = GCodeLine(count, l)
                 self.lines.append(gcl)
+                
+                if(l.startswith('; filament_density = ')):
+                    vals = l.replace('; filament_density = ', '').strip()
+                    for v in vals.split(','):
+                        try:
+                            self.auto_density.append(float(v))
+                        except ValueError:
+                            raise
+                            
+                if(l.startswith('; filament_diameter = ')):
+                    vals = l.replace('; filament_diameter = ', '').strip()
+                    for v in vals.split(','):
+                        try:
+                            self.auto_diameter.append(float(v))
+                        except ValueError:
+                            pass
+                    
                 
         return self.lines
         
@@ -225,8 +244,6 @@ class MoveSim:
         lastTool = -1
         total_len = {}
         total_mass = {}
-        g_per_mm3 = density * 0.001
-        radius_squared = math.pow(diameter/2.0, 2)
         
         print("Inserting automatic pauses...")
         
@@ -234,7 +251,11 @@ class MoveSim:
             if len(self.used_tools) >= 1:
                 tool = list(self.used_tools)[0]
             else:
+                self.used_tools = [0]
                 tool = 0
+        
+        if len(self.used_tools) == 0:
+            self.used_tools = [tool]
                 
         mass_targets = []
         for m in mass.strip().split(','):
@@ -266,6 +287,40 @@ class MoveSim:
         len_target = None
         if len(len_targets):
             len_target = len_targets[len_target_cur]
+        
+        g_per_mm3 = {}
+        radius_squared = {}
+
+        if mass_target:
+            if density is None:
+                if len(self.auto_density) >= len(self.used_tools):
+                    for i in range(len(self.used_tools)):
+                        print(f'Auto-detected {self.auto_density[i]} g/mm^3 density filament for T{self.used_tools[i]}')
+                        g_per_mm3[self.used_tools[i]] = self.auto_density[i] * 0.001
+                else:
+                    for t in self.used_tools:
+                        print(f'Using default 1.24 g/mm^3 density for T{t}')
+                        g_per_mm3[t] = 1.24 * 0.001 #default to PLA density
+            else:
+                for t in self.used_tools:
+                    print(f'Using default {density} g/mm^3 density for T{t}')
+                    g_per_mm3[t] = density * 0.001 #use provided density
+                        
+            if diameter is None:
+                if len(self.auto_diameter) >= len(self.used_tools):
+                    for i in range(len(self.used_tools)):
+                        print(f'Auto-detected {self.auto_diameter[i]} mm diameter filament for T{self.used_tools[i]}')
+                        radius_squared[self.used_tools[i]] = math.pow(self.auto_diameter[i]/2.0, 2)
+                else:
+                    for t in self.used_tools:
+                        print(f'Using default 1.75 mm diameter for T{t}')
+                        radius_squared[t] = math.pow(1.75/2.0, 2) #default to diameter
+            else:
+                for t in self.used_tools:
+                    print(f'Using {diameter} mm diameter for T{t}')
+                    radius_squared[t] = math.pow(diameter/2.0, 2) #use provided diameter
+                    
+                    
 
         for l in self.lines:
             if isinstance(l, Move):
@@ -280,7 +335,7 @@ class MoveSim:
                         
                     total_len[l.t] += l.e
                     
-                    mass = math.pi * radius_squared * l.e * g_per_mm3
+                    mass = math.pi * radius_squared[l.t] * l.e * g_per_mm3[l.t]
                     total_mass[l.t] += mass
                     
                     if l.t == None or tool == l.t:
@@ -344,8 +399,8 @@ def main():
     #parser for pause
     parser_pause = subs.add_parser('pause', help='Inject automatic pause based on mass or length')
     parser_pause.add_argument('--tool', type=int, default=-1, help='Tool to apply pause to')
-    parser_pause.add_argument('--diameter', type=float, default=1.75, help='Filament diameter. Defaults to 1.75mm')
-    parser_pause.add_argument('--density', type=float, default=1.24, help='Filament density in g/cm^3. Defaults to 1.24 for PLA')
+    parser_pause.add_argument('--diameter', type=float, default=None, help='Filament diameter. Defaults to 1.75mm')
+    parser_pause.add_argument('--density', type=float, default=None, help='Filament density in g/cm^3. Defaults to 1.24 for PLA')
     group = parser_pause.add_mutually_exclusive_group(required=True)
     group.add_argument('--mass', type=str, default='', help='Pause at this many grams')
     group.add_argument('--length', type=str, default='', help='Pause at this length in mm')
