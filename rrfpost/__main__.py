@@ -1,0 +1,3 @@
+import rrfpost
+
+rrfpost.main()
