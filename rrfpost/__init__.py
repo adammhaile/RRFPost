@@ -13,13 +13,27 @@ class GCodeLine():
         self.line = line
         self.pre = None
         self.post = None
+        self.suppress = False
+        
+    def IsRetract(self):
+        if self.line.startswith('G10 ; retract'):
+            return True
+            
+        return False
+            
+    def IsUnretract(self):
+        if self.line.startswith('G11 ; unretract'):
+            return True
+            
+        return False
         
     def get_lines(self, comments=True):
         res = ''
-        if(self.pre is not None): res += (self.pre + '\n')
-        if comments or ((not comments) and (not self.line.lstrip().startswith(';'))):
-            res += (self.line + '\n')
-        if(self.post is not None): res += (self.post + '\n')
+        if not self.suppress:
+            if(self.pre is not None): res += (self.pre + '\n')
+            if comments or ((not comments) and (not self.line.lstrip().startswith(';'))):
+                res += (self.line + '\n')
+            if(self.post is not None): res += (self.post + '\n')
         return res
         
     def __str__(self):
@@ -36,6 +50,20 @@ class Move(GCodeLine):
         self.t = t
         self.time = 0.0
         
+    def IsRetract(self):
+        if self.x is None and self.y is None and self.z is None:
+            if (self.e is not None and self.e < 0.0):
+                return True
+                
+        return False
+            
+    def IsUnretract(self):
+        if self.x is None and self.y is None and self.z is None:
+            if (self.e is not None and self.e > 0.0):
+                return True
+                
+        return False
+
     def gen_relative_xyz(self, x, y, z):
         rx = 0.0
         if(self.x is not None):
@@ -379,6 +407,41 @@ class MoveSim:
             all_total += total
             
         print(f'  Total:  {round(all_total, 2)} g')
+        
+    def wipe_tower_fix(self):
+        out_lines = []
+        
+        last_retract = (-1, None)
+        last_unretract = (-1, None)
+        unretract_insert = None
+        for i in range(len(self.lines)):
+            l = self.lines[i]
+            
+            if unretract_insert is not None and l.line.startswith('; CP TOOLCHANGE WIPE'):
+                out_lines.append(unretract_insert)
+                unretract_insert = None
+            
+            out_lines.append(l)
+            if l.IsRetract():
+                last_retract = (len(out_lines)-1, l)
+            if l.IsUnretract():
+                last_unretract = (len(out_lines)-1, l)
+                
+            if l.line.startswith('; CP TOOLCHANGE START'):
+                ri, rl = last_retract
+                ui, ul = last_unretract
+                if ui == ri+2:
+                    out_lines[ri+1].suppress = True
+                    out_lines[ui].suppress = True
+                    unretract_insert = GCodeLine(ul.num, ul.line)
+                    
+                last_retract = (-1, None)
+                last_unretract = (-1, None)
+                
+        self.lines = out_lines
+                    
+                
+            
                 
 
 def load_file(path):
@@ -396,7 +459,7 @@ def main():
     parser_preheat = subs.add_parser('preheat', help='Inject automatic tool preheats')
     parser_preheat.add_argument('--sec', type=int, default=30.0, help='Aproximate seconds to allow for preheat')
     
-    #parser for pause
+    # parser for pause
     parser_pause = subs.add_parser('pause', help='Inject automatic pause based on mass or length')
     parser_pause.add_argument('--tool', type=int, default=-1, help='Tool to apply pause to')
     parser_pause.add_argument('--diameter', type=float, default=None, help='Filament diameter. Defaults to 1.75mm')
@@ -408,6 +471,9 @@ def main():
     
     parser.add_argument('gcode', action='store',
                         help='gcode file to process')
+                        
+    # parser for wipe tower fix
+    parser_wipe = subs.add_parser('wtrf', help='Wipe Tower Retract Fix')
                         
     args = parser.parse_args()
     
@@ -422,6 +488,8 @@ def main():
         ms.gen_warmups(args.sec)
     elif(args.cmd == 'pause'):
         ms.gen_pause(**vars(args))
+    elif(args.cmd == 'wtrf'):
+        ms.wipe_tower_fix()
     
     with open(infile, 'w') as f:
         for l in ms.lines:

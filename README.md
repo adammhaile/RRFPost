@@ -66,3 +66,22 @@ Run `rrfpost pause <OPTIONS> <GCODE_PATH>` where `GCODE_PATH` is your file and `
 
 Note that `--mass` and `--length` are mutually exclusive. Also, if you are running more than one tool in a print and want to provide automatic pauses you can do so by running the tool more than once, changing the value of the `--tool` parameter each time.
 
+## Wipe Tower Retract Fix
+
+As noted in [this issue report](https://github.com/prusa3d/PrusaSlicer/issues/5377), PrusaSlicer will insert a move to the top of the wipe tower with an unretract before tool change. This is a holdover from the MMU way of doing things and there is no way to remove it from within PrusaSlicer at this time.
+
+This command is simple and requires no arguments. When used it will find any of these instances, remove the move to the tower, and relocate the unretract to being **after** the tool change (when the new tool is already selected). So at the end of each tool's section in the gcode you will get the following:
+
+- Unretract
+- Change to new tool
+- Move back over the wipe tower
+- Unretract
+- Purge to wipe tower
+
+### Usage
+
+You will need to add a call to this as a post-processing script just as noted for the [Tool Preheat Setup](#setup) but add the following:
+
+`rrfpost wtrf`
+
+That's it - those unwanted move/unretracts over the wipe tower will be removed.
