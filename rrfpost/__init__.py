@@ -426,7 +426,6 @@ class MoveSim:
         suppress_moves = False
         for i in range(len(self.lines)):
             l = self.lines[i]
-            
             if unretract_insert is not None:
                 if l.line.startswith('; CP TOOLCHANGE WIPE'):
                     # print(unretract_insert.pre)
@@ -460,7 +459,7 @@ class MoveSim:
 
                 if ui >= ri+2:
                     for j in range(ri+1, ui):
-                        if out_lines[j].line:
+                        if out_lines[j].line and isinstance(out_lines[j], Move):
                             out_lines[j].RemoveMove()
                     unretract_insert = GCodeLine(ul.num, ul.line)
                     unretract_insert.pre = ul.pre
