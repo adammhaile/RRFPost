@@ -1,8 +1,11 @@
+from contextlib import suppress
 import sys
 import os
 import re
 import argparse
 import math
+
+from numpy import isin
 from . version import VERSION
 
 MOVE_RE = '([XYZEF] *-?\d*.?\d*)'
@@ -13,7 +16,6 @@ class GCodeLine():
         self.line = line
         self.pre = None
         self.post = None
-        self.suppress = False
         
     def IsRetract(self):
         if self.line.startswith('G10 ; retract'):
@@ -29,11 +31,11 @@ class GCodeLine():
         
     def get_lines(self, comments=True):
         res = ''
-        if not self.suppress:
-            if(self.pre is not None): res += (self.pre + '\n')
-            if comments or ((not comments) and (not self.line.lstrip().startswith(';'))):
-                res += (self.line + '\n')
-            if(self.post is not None): res += (self.post + '\n')
+  
+        if(self.pre is not None): res += (self.pre + '\n')
+        if comments or ((not comments) and (not self.line.lstrip().startswith(';'))):
+            res += (self.line + '\n')
+        if(self.post is not None): res += (self.post + '\n')
         return res
         
     def __str__(self):
@@ -63,6 +65,13 @@ class Move(GCodeLine):
                 return True
                 
         return False
+        
+    def RemoveMove(self):
+        if self.line.startswith('G1 '):
+            if self.f is not None:
+                self.line = f'G1 F{int(self.f)*60}'
+            else:
+                self.line = ''
 
     def gen_relative_xyz(self, x, y, z):
         rx = 0.0
@@ -414,12 +423,18 @@ class MoveSim:
         last_retract = (-1, None)
         last_unretract = (-1, None)
         unretract_insert = None
+        suppress_moves = False
         for i in range(len(self.lines)):
             l = self.lines[i]
             
-            if unretract_insert is not None and l.line.startswith('; CP TOOLCHANGE WIPE'):
-                out_lines.append(unretract_insert)
-                unretract_insert = None
+            if unretract_insert is not None:
+                if l.line.startswith('; CP TOOLCHANGE WIPE'):
+                    out_lines.append(unretract_insert)
+                    unretract_insert = None
+                    suppress_moves = False
+                elif isinstance(l, Move) and suppress_moves and (l.x or l.y):
+                    #while waiting for Tool Change command, suppress moves, but leave feed
+                    l.RemoveMove()
             
             out_lines.append(l)
             if l.IsRetract():
@@ -427,13 +442,17 @@ class MoveSim:
             if l.IsUnretract():
                 last_unretract = (len(out_lines)-1, l)
                 
+            if suppress_moves and isinstance(l, ToolChange):
+                suppress_moves = False
+                
             if l.line.startswith('; CP TOOLCHANGE START'):
                 ri, rl = last_retract
                 ui, ul = last_unretract
                 if ui == ri+2:
-                    out_lines[ri+1].suppress = True
-                    out_lines[ui].suppress = True
+                    out_lines[ri+1].RemoveMove()
                     unretract_insert = GCodeLine(ul.num, ul.line)
+                    out_lines[ui].line = ''
+                    suppress_moves = True
                     
                 last_retract = (-1, None)
                 last_unretract = (-1, None)
