@@ -209,7 +209,7 @@ class MoveSim:
                         except ValueError:
                             pass
                     
-                
+        self.used_tools = list(self.used_tools)
         return self.lines
         
     def calc_times(self):
@@ -286,7 +286,7 @@ class MoveSim:
         
         if tool == -1:
             if len(self.used_tools) >= 1:
-                tool = list(self.used_tools)[0]
+                tool = self.used_tools[0]
             else:
                 self.used_tools = [0]
                 tool = 0
