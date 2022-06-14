@@ -5,7 +5,6 @@ import re
 import argparse
 import math
 
-from numpy import isin
 from . version import VERSION
 
 MOVE_RE = '([XYZEF] *-?\d*.?\d*)'
